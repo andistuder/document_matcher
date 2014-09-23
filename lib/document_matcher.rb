@@ -1,13 +1,12 @@
 #!/usr/bin/env ruby
 require 'csv'
 require 'date'
-require 'redis'
-require 'oj'
-require 'hiredis'
+require 'json'
 
 class DocumentMatcher
   attr_accessor :account_recoveries_file_name,
     :account_recoveries_file_headers,
+    :account_recoveries,
     :transactions_file_name,
     :transactions_file_headers,
     :log_file_name,
@@ -20,7 +19,6 @@ class DocumentMatcher
     params_hash.each do |k,v|
       self.send("#{k}=", v)
     end
-    get_empty_db
     set_output_file_headers
   end
 
@@ -37,33 +35,25 @@ class DocumentMatcher
       prcoess_matching_records(transaction, matching_recoveries)
     end
 
-    truncate_db
     publish_log "Processed #{i} transactions"
   end
 
   private
-  attr_reader :redis_client
 
   def load_account_recoveries_from_csv
     i = 0
-    record = {}
+    records = []
 
-    redis_client.pipelined do
+    CSV.foreach(account_recoveries_file_name, :headers => false) do |row|
+      i += 1
 
-      CSV.foreach(account_recoveries_file_name, :headers => false) do |row|
-        i += 1
-
-        record = process_csv_row(row, account_recoveries_file_headers)
-        json_record = Oj.dump(record)
-
-        redis_client.sadd "date:#{record[:created_at_day]}:account_recoveries", json_record
-        redis_client.sadd "loan_part:#{record[:loan_part_id]}:account_recoveries", json_record
-        redis_client.sadd "account:#{record[:cashfac_id]}:account_recoveries", json_record
-      end
+      records << process_csv_row(row, account_recoveries_file_headers)
     end
 
+    @account_recoveries = records
+
     publish_log "FCA account recoveries count: #{i}, sample: \n"
-    publish_log record.to_s
+    publish_log account_recoveries.last.to_s
   end
 
   def process_bilcas_csv_row(row)
@@ -92,10 +82,10 @@ class DocumentMatcher
   end
 
   def find_account_recoveries(created_at_day, loan_part_id, holder_reference)
-    documents = redis_client.sinter "date:#{created_at_day}:account_recoveries",
-      "loan_part:#{loan_part_id}:account_recoveries",
-      "account:#{holder_reference}:account_recoveries"
-    documents.map {|d| Oj.load(d)}
+    account_recoveries.select { | account_recovery | created_at_day == account_recovery[:created_at_day] &&
+      loan_part_id == account_recovery[:loan_part_id] &&
+      holder_reference == account_recovery[:cashfac_id]
+    }
   end
 
   def prcoess_matching_records(transaction, matching_recoveries)
@@ -135,28 +125,12 @@ class DocumentMatcher
   end
 
   def purge_account_recovery(recovery)
-    record = Oj.dump(recovery)
-    redis_client.srem "date:#{recovery[:created_at_day]}:account_recoveries", record
-    redis_client.srem "loan_part:#{recovery[:loan_part_id]}:account_recoveries", record
-    redis_client.srem "account:#{recovery[:holder_reference]}:account_recoveries", record
+    index = account_recoveries.find_index(recovery)
+    account_recoveries.delete_at(index) if index
   end
 
   def export_recovery_transactions(transaction, new_amount)
     transaction_entry = [transaction[:id], transaction[:holder_reference], transaction[:amount_pennies], new_amount]
     CSV.open(output_file_name, 'ab') {|csv| csv << transaction_entry}
-  end
-
-  def get_empty_db
-    redis_db_index = 0
-    loop do
-      @redis_client = Redis.new(driver: :hiredis, db:redis_db_index)
-      break if @redis_client.dbsize == 0
-      redis_db_index += 1
-    end
-    publish_log "Connected to redis db #{redis_db_index}"
-  end
-
-  def truncate_db
-    redis_client.flushdb
   end
 end
