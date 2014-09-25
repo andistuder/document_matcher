@@ -2,7 +2,8 @@
 require 'csv'
 require 'date'
 require 'redis'
-require 'json'
+require 'oj'
+require 'hiredis'
 
 class DocumentMatcher
   attr_accessor :account_recoveries_file_name,
@@ -53,7 +54,7 @@ class DocumentMatcher
         i += 1
 
         record = process_csv_row(row, account_recoveries_file_headers)
-        json_record = record.to_json
+        json_record = Oj.dump(record)
 
         redis_client.sadd "date:#{record[:created_at_day]}:account_recoveries", json_record
       end
@@ -90,7 +91,7 @@ class DocumentMatcher
 
   def find_account_recoveries(created_at_day, loan_part_id, holder_reference)
     documents = redis_client.smembers "date:#{created_at_day}:account_recoveries"
-    account_recoveries_for_date = documents.map {|d| JSON.parse(d, { symbolize_names: true })}
+    account_recoveries_for_date = documents.map {|d| Oj.load(d)}
     account_recoveries_for_date.select { | account_recovery | loan_part_id == account_recovery[:loan_part_id] && holder_reference == account_recovery[:cashfac_id] }
   end
 
@@ -131,7 +132,7 @@ class DocumentMatcher
   end
 
   def purge_account_recovery(recovery)
-    record = recovery.to_json
+    record = Oj.dump(recovery)
     redis_client.srem "date:#{recovery[:created_at_day]}:account_recoveries", record
   end
 
@@ -143,7 +144,7 @@ class DocumentMatcher
   def get_empty_db
     redis_db_index = 0
     loop do
-      @redis_client = Redis.new(db:redis_db_index)
+      @redis_client = Redis.new(driver: :hiredis, db:redis_db_index)
       break if @redis_client.dbsize == 0
       redis_db_index += 1
     end
