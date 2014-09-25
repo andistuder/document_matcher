@@ -57,6 +57,8 @@ class DocumentMatcher
         json_record = Oj.dump(record)
 
         redis_client.sadd "date:#{record[:created_at_day]}:account_recoveries", json_record
+        redis_client.sadd "loan_part:#{record[:loan_part_id]}:account_recoveries", json_record
+        redis_client.sadd "account:#{record[:cashfac_id]}:account_recoveries", json_record
       end
     end
 
@@ -90,9 +92,10 @@ class DocumentMatcher
   end
 
   def find_account_recoveries(created_at_day, loan_part_id, holder_reference)
-    documents = redis_client.smembers "date:#{created_at_day}:account_recoveries"
-    account_recoveries_for_date = documents.map {|d| Oj.load(d)}
-    account_recoveries_for_date.select { | account_recovery | loan_part_id == account_recovery[:loan_part_id] && holder_reference == account_recovery[:cashfac_id] }
+    documents = redis_client.sinter "date:#{created_at_day}:account_recoveries",
+      "loan_part:#{loan_part_id}:account_recoveries",
+      "account:#{holder_reference}:account_recoveries"
+    documents.map {|d| Oj.load(d)}
   end
 
   def prcoess_matching_records(transaction, matching_recoveries)
@@ -134,6 +137,8 @@ class DocumentMatcher
   def purge_account_recovery(recovery)
     record = Oj.dump(recovery)
     redis_client.srem "date:#{recovery[:created_at_day]}:account_recoveries", record
+    redis_client.srem "loan_part:#{recovery[:loan_part_id]}:account_recoveries", record
+    redis_client.srem "account:#{recovery[:holder_reference]}:account_recoveries", record
   end
 
   def export_recovery_transactions(transaction, new_amount)
